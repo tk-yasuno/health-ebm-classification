@@ -18,6 +18,7 @@ from typing import Dict, List, Tuple, Any, Optional
 import matplotlib.pyplot as plt
 import seaborn as sns
 import warnings
+import time  # 実行時間測定用
 warnings.filterwarnings('ignore')
 
 class HealthLevelClassifier:
@@ -131,29 +132,38 @@ class HealthLevelClassifier:
         )
     
     def create_ebm_model(self) -> ExplainableBoostingClassifier:
-        """Explainable Boosting Machine（EBM）モデルの作成"""
+        """Explainable Boosting Machine（EBM）モデルの作成
+        高速化パラメータ: 16並列ワーカー、計算量削減設定
+        """
         return ExplainableBoostingClassifier(
             random_state=self.random_state,
-            max_bins=256,
-            max_interaction_bins=32,
-            interactions=10,
-            outer_bags=8,
-            inner_bags=0,
-            learning_rate=0.01,
-            validation_size=0.15,
-            early_stopping_rounds=50,
-            early_stopping_tolerance=1e-4
+            # 並列処理設定
+            n_jobs=16,  # 16並列ワーカー
+            # 高速化のための計算量削減
+            max_bins=128,  # 256→128に削減（2倍高速化）
+            max_interaction_bins=16,  # 32→16に削減（2倍高速化）
+            interactions=5,  # 10→5に削減（2倍高速化）
+            outer_bags=4,  # 8→4に削減（2倍高速化）
+            inner_bags=0,  # 内部バッグ無効でさらに高速化
+            # 学習効率化
+            learning_rate=0.02,  # 学習率向上で早期収束
+            validation_size=0.1,  # 検証サイズ削減
+            early_stopping_rounds=30,  # 早期停止を積極的に
+            early_stopping_tolerance=1e-3,  # 収束判定を緩める
+            # メモリ効率化
+            max_rounds=500,  # 最大ラウンド数制限
         )
     
     def create_random_forest_model(self) -> RandomForestClassifier:
-        """Random Forestモデルの作成"""
+        """Random Forestモデルの作成（並列処理最適化）"""
         return RandomForestClassifier(
             random_state=self.random_state,
             n_estimators=100,
             max_depth=10,
             min_samples_split=5,
             min_samples_leaf=2,
-            class_weight='balanced'
+            class_weight='balanced',
+            n_jobs=16  # 16並列ワーカー
         )
     
     def create_ensemble_model(self) -> VotingClassifier:
@@ -173,9 +183,10 @@ class HealthLevelClassifier:
     
     def train_single_model(self, model, X_train: np.ndarray, y_train: np.ndarray,
                           X_val: np.ndarray, y_val: np.ndarray, model_name: str) -> Dict[str, Any]:
-        """単一モデルの訓練と評価"""
+        """単一モデルの訓練と評価（実行時間測定付き）"""
         
         print(f"\nTraining {model_name}...")
+        start_time = time.time()
         
         # XGBoostのためにラベルを0ベースに変換
         if 'XGBoost' in model_name or 'xgb' in str(type(model)).lower():
@@ -187,6 +198,7 @@ class HealthLevelClassifier:
         
         # 訓練
         model.fit(X_train, y_train_encoded)
+        training_time = time.time() - start_time
         
         # 予測
         y_train_pred = model.predict(X_train)
@@ -201,6 +213,7 @@ class HealthLevelClassifier:
         results = {
             'model': model,
             'model_name': model_name,
+            'training_time': training_time,
             'train_accuracy': accuracy_score(y_train, y_train_pred),
             'val_accuracy': accuracy_score(y_val, y_val_pred),
             'train_f1_macro': f1_score(y_train, y_train_pred, average='macro'),
@@ -211,12 +224,14 @@ class HealthLevelClassifier:
             'confusion_matrix': confusion_matrix(y_val, y_val_pred)
         }
         
-        # クロスバリデーションも同様にラベル調整
+        print(f"Training completed in {training_time:.2f} seconds")
+        
+        # クロスバリデーションも同様にラベル調整（並列処理有効化）
         try:
             if 'XGBoost' in model_name or 'xgb' in str(type(model)).lower():
-                cv_scores = cross_val_score(model, X_train, y_train_encoded, cv=5, scoring='f1_macro')
+                cv_scores = cross_val_score(model, X_train, y_train_encoded, cv=5, scoring='f1_macro', n_jobs=16)
             else:
-                cv_scores = cross_val_score(model, X_train, y_train, cv=5, scoring='f1_macro')
+                cv_scores = cross_val_score(model, X_train, y_train, cv=5, scoring='f1_macro', n_jobs=16)
             results['cv_f1_macro_mean'] = cv_scores.mean()
             results['cv_f1_macro_std'] = cv_scores.std()
         except Exception as e:
@@ -341,7 +356,10 @@ class HealthLevelClassifier:
                 # Precision (適合率): Repair-requirementと予測したもののうち正解の割合
                 pred_repair_mask = (y_pred == 3)
                 if pred_repair_mask.sum() > 0:
-                    precision = (y_pred[pred_repair_mask] == y_test.values[pred_repair_mask]).sum() / pred_repair_mask.sum()
+                    if hasattr(y_test, 'values'):
+                        precision = (y_pred[pred_repair_mask] == y_test.values[pred_repair_mask]).sum() / pred_repair_mask.sum()
+                    else:
+                        precision = (y_pred[pred_repair_mask] == y_test[pred_repair_mask]).sum() / pred_repair_mask.sum()
                 else:
                     precision = 0.0
                 

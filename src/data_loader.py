@@ -188,37 +188,89 @@ class InspectionDataLoader:
         
         return np.nan
     
-    def create_aggregated_features(self) -> pd.DataFrame:
-        """橋梁レベルでの集約特徴量を作成"""
+    def create_aggregated_features(self, use_full_data: bool = False) -> pd.DataFrame:
+        """橋梁レベルでの集約特徴量を作成
+        
+        Parameters:
+        -----------
+        use_full_data : bool, default=False
+            Trueの場合、個別レコードレベルでの特徴量を使用（9753件）
+            Falseの場合、橋梁別集約特徴量を使用（276件）
+        """
         if self.processed_data is None:
             raise ValueError("Data not preprocessed. Call basic_preprocessing() first.")
         
-        # 橋梁×診断日レベルでの集約
-        agg_features = self.processed_data.groupby(['BridgeID', 'BridgeName', 'InspectionYMD', 'HealthLevel']).agg({
-            'DiagnosisID': 'nunique',  # 診断項目数
-            'DamageID': 'nunique',     # 損傷数
-            'damage_rank_encoded': ['mean', 'max'],  # 損傷ランクの平均・最大
-            'crack_width': ['mean', 'max', 'count'],  # ひび割れ幅の統計
-            'area_measurement': ['sum', 'max'],       # 面積の統計
-            'Diagnosis': lambda x: ' '.join(x.dropna().astype(str).unique()),  # 診断テキストの結合
-            'DamageComment': lambda x: ' '.join(x.dropna().astype(str).unique())  # 損傷コメントの結合
-        }).reset_index()
+        if use_full_data:
+            print("🚀 フルデータモード: 個別レコードレベル（9753件）で学習")
+            # 個別レコードレベルでの特徴量
+            full_data = self.processed_data.copy()
+            
+            # HealthLevelのエンコーディング
+            def encode_health_level(level):
+                if level == 'Ⅰ':
+                    return 1
+                elif level == 'Ⅱ':
+                    return 2
+                elif level in ['Ⅲ', 'Ⅳ', 'Ⅴ']:
+                    return 3  # Repair-requirement クラス
+                else:
+                    return None
+            
+            full_data['health_level_encoded'] = full_data['HealthLevel'].apply(encode_health_level)
+            full_data = full_data[full_data['health_level_encoded'].notna()].copy()
+            
+            # テキスト特徴量の準備
+            full_data['combined_text'] = (
+                full_data['diagnosis_cleaned'].fillna('') + ' ' + 
+                full_data['damage_comment_cleaned'].fillna('')
+            ).str.strip()
+            
+            # 基本的な数値特徴量
+            feature_columns = [
+                'BridgeID', 'health_level_encoded', 'DamageRank', 
+                'crack_width', 'area_measurement', 'combined_text'
+            ]
+            
+            # 数値特徴量の欠損値処理
+            full_data['crack_width'] = full_data['crack_width'].fillna(0)
+            full_data['area_measurement'] = full_data['area_measurement'].fillna(0)
+            full_data['DamageRank'] = pd.to_numeric(full_data['DamageRank'], errors='coerce').fillna(1)
+            
+            result_data = full_data[feature_columns].copy()
+            print(f"フルデータ形状: {result_data.shape}")
+            print(f"HealthLevel分布:")
+            print(full_data['HealthLevel'].value_counts())
+            
+            return result_data
         
-        # カラム名の整理
-        agg_features.columns = [
-            'BridgeID', 'BridgeName', 'InspectionYMD', 'HealthLevel',
-            'diagnosis_count', 'damage_count',
-            'damage_rank_mean', 'damage_rank_max',
-            'crack_width_mean', 'crack_width_max', 'crack_width_count',
-            'area_sum', 'area_max',
-            'diagnosis_text', 'damage_comment_text'
-        ]
-        
-        # テキストクリーニング
-        agg_features['diagnosis_text'] = agg_features['diagnosis_text'].apply(self._clean_text)
-        agg_features['damage_comment_text'] = agg_features['damage_comment_text'].apply(self._clean_text)
-        
-        return agg_features
+        else:
+            print("📊 集約モード: 橋梁別集約（276件）で学習")
+            # 橋梁×診断日レベルでの集約（元のロジック）
+            agg_features = self.processed_data.groupby(['BridgeID', 'BridgeName', 'InspectionYMD', 'HealthLevel']).agg({
+                'DiagnosisID': 'nunique',  # 診断項目数
+                'DamageID': 'nunique',     # 損傷数
+                'damage_rank_encoded': ['mean', 'max'],  # 損傷ランクの平均・最大
+                'crack_width': ['mean', 'max', 'count'],  # ひび割れ幅の統計
+                'area_measurement': ['sum', 'max'],       # 面積の統計
+                'Diagnosis': lambda x: ' '.join(x.dropna().astype(str).unique()),  # 診断テキストの結合
+                'DamageComment': lambda x: ' '.join(x.dropna().astype(str).unique())  # 損傷コメントの結合
+            }).reset_index()
+            
+            # カラム名の整理
+            agg_features.columns = [
+                'BridgeID', 'BridgeName', 'InspectionYMD', 'HealthLevel',
+                'diagnosis_count', 'damage_count',
+                'damage_rank_mean', 'damage_rank_max',
+                'crack_width_mean', 'crack_width_max', 'crack_width_count',
+                'area_sum', 'area_max',
+                'diagnosis_text', 'damage_comment_text'
+            ]
+            
+            # テキストクリーニング
+            agg_features['diagnosis_text'] = agg_features['diagnosis_text'].apply(self._clean_text)
+            agg_features['damage_comment_text'] = agg_features['damage_comment_text'].apply(self._clean_text)
+            
+            return agg_features
 
 def main():
     """データローダーのテスト実行"""

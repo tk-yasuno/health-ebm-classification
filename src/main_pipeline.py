@@ -22,7 +22,7 @@ from model_trainer import HealthLevelClassifier
 class HealthLevelMVP:
     """HealthLevel分類MVPのメインクラス"""
     
-    def __init__(self, data_dir: str, output_dir: str = "../models"):
+    def __init__(self, data_dir: str, output_dir: str = "../models", use_full_data: bool = False):
         """
         Parameters:
         -----------
@@ -30,10 +30,14 @@ class HealthLevelMVP:
             データディレクトリのパス
         output_dir : str
             出力ディレクトリのパス
+        use_full_data : bool, default=False
+            Trueの場合、フルデータ9753件で学習
+            Falseの場合、集約データ276件で学習
         """
         self.data_dir = data_dir
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
+        self.use_full_data = use_full_data
         
         self.data_loader = InspectionDataLoader(data_dir)
         self.feature_engineer = FeatureEngineer()
@@ -93,17 +97,29 @@ class HealthLevelMVP:
         # 基本前処理
         self.processed_data = self.data_loader.basic_preprocessing()
         
-        # 集約特徴量の作成
-        self.aggregated_data = self.data_loader.create_aggregated_features()
+        # 集約特徴量の作成（フルデータモードまたは集約モード）
+        self.aggregated_data = self.data_loader.create_aggregated_features(use_full_data=self.use_full_data)
         
-        print(f"\n処理後データ形状: {self.aggregated_data.shape}")
-        print(f"集約後のHealthLevel分布:")
-        print(self.aggregated_data['HealthLevel'].value_counts())
+        if self.use_full_data:
+            print(f"\n🚀 フルデータモード実行中")
+            print(f"処理後データ形状: {self.aggregated_data.shape}")
+            print(f"HealthLevel分布:")
+            # フルデータの場合はhealth_level_encodedから分布を計算
+            health_dist = self.aggregated_data['health_level_encoded'].value_counts().sort_index()
+            level_names = {1: 'Ⅰ', 2: 'Ⅱ', 3: 'Repair-requirement (III+)'}
+            for code, count in health_dist.items():
+                print(f"  {level_names.get(code, code)}: {count}")
+        else:
+            print(f"\n📊 集約モード実行中")
+            print(f"処理後データ形状: {self.aggregated_data.shape}")
+            print(f"集約後のHealthLevel分布:")
+            print(self.aggregated_data['HealthLevel'].value_counts())
         
         # 欠損値の確認
         missing_info = self.aggregated_data.isnull().sum()
-        print(f"\n欠損値情報:")
-        print(missing_info[missing_info > 0])
+        if missing_info.sum() > 0:
+            print(f"\n欠損値情報:")
+            print(missing_info[missing_info > 0])
         
         return self.aggregated_data
     
@@ -113,24 +129,28 @@ class HealthLevelMVP:
         print("STEP 3: データ分割（Split）")
         print("=" * 50)
         
-        # HealthLevelのエンコーディング（III以上をRepair-requirementクラスに統合）
-        def encode_health_level(level):
-            if level == 'Ⅰ':
-                return 1
-            elif level == 'Ⅱ':
-                return 2
-            elif level in ['Ⅲ', 'Ⅳ', 'Ⅴ']:
-                return 3  # Repair-requirement クラス
-            else:
-                return None  # Nやその他の値は除外
-        
-        # 集約データにhealth_level_encodedがない場合は作成
-        if 'health_level_encoded' not in self.aggregated_data.columns:
-            self.aggregated_data['health_level_encoded'] = self.aggregated_data['HealthLevel'].apply(encode_health_level)
-            # Nレベルを除外
-            self.aggregated_data = self.aggregated_data[self.aggregated_data['health_level_encoded'].notna()].copy()
-        
-        self.aggregated_data['target'] = self.aggregated_data['health_level_encoded']
+        if self.use_full_data:
+            # フルデータモードではhealth_level_encodedが既に存在
+            self.aggregated_data['target'] = self.aggregated_data['health_level_encoded']
+        else:
+            # 集約モードでは従来通りエンコーディング
+            def encode_health_level(level):
+                if level == 'Ⅰ':
+                    return 1
+                elif level == 'Ⅱ':
+                    return 2
+                elif level in ['Ⅲ', 'Ⅳ', 'Ⅴ']:
+                    return 3  # Repair-requirement クラス
+                else:
+                    return None  # Nやその他の値は除外
+            
+            # 集約データにhealth_level_encodedがない場合は作成
+            if 'health_level_encoded' not in self.aggregated_data.columns:
+                self.aggregated_data['health_level_encoded'] = self.aggregated_data['HealthLevel'].apply(encode_health_level)
+                # Nレベルを除外
+                self.aggregated_data = self.aggregated_data[self.aggregated_data['health_level_encoded'].notna()].copy()
+            
+            self.aggregated_data['target'] = self.aggregated_data['health_level_encoded']
         
         # 特徴量とターゲットの分離
         self.target = self.aggregated_data['target'].values
@@ -150,16 +170,26 @@ class HealthLevelMVP:
         print("STEP 4: 特徴量エンジニアリング")
         print("=" * 50)
         
-        # 特徴量の作成
-        self.features, feature_names = self.feature_engineer.create_all_features(
-            self.aggregated_data,
-            text_columns=['diagnosis_text', 'damage_comment_text'],
-            categorical_columns=['BridgeName', 'inspection_year', 'inspection_month'],
-            numerical_columns=['diagnosis_count', 'damage_count', 'damage_rank_mean', 
-                             'damage_rank_max', 'crack_width_mean', 'crack_width_max', 
-                             'area_sum', 'area_max'],
-            fit=True
-        )
+        if self.use_full_data:
+            # フルデータモードの特徴量作成
+            self.features, feature_names = self.feature_engineer.create_all_features(
+                self.aggregated_data,
+                text_columns=['combined_text'],
+                categorical_columns=[],  # フルデータでは現在はシンプルに
+                numerical_columns=['DamageRank', 'crack_width', 'area_measurement'],
+                fit=True
+            )
+        else:
+            # 集約モードの特徴量作成（従来通り）
+            self.features, feature_names = self.feature_engineer.create_all_features(
+                self.aggregated_data,
+                text_columns=['diagnosis_text', 'damage_comment_text'],
+                categorical_columns=['BridgeName', 'inspection_year', 'inspection_month'],
+                numerical_columns=['diagnosis_count', 'damage_count', 'damage_rank_mean', 
+                                 'damage_rank_max', 'crack_width_mean', 'crack_width_max', 
+                                 'area_sum', 'area_max'],
+                fit=True
+            )
         
         self.classifier.feature_names = feature_names
         
@@ -472,11 +502,14 @@ if __name__ == "__main__":
 def main():
     """メイン実行"""
     
-    # MVPパイプラインの実行
+    # 🚀 フルデータモード（9753件）でMVPパイプラインの実行
     mvp = HealthLevelMVP(
         data_dir="../1_inspection-dataset",
-        output_dir="../models"
+        output_dir="../models",
+        use_full_data=True  # フルデータモードを有効化
     )
+    
+    print("🚀 フルデータモード（9753件）で学習を開始します！")
     
     results = mvp.run_full_pipeline()
     

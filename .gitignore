@@ -43,10 +43,10 @@ env/
 *.csv
 !sample_*.csv
 
-# Model files (can be large)
-models/
+# Model files (can be large) - v0.3では重要な成果物として追加
+# models/  # v0.3成果物は含める
 *.pkl
-*.joblib
+# *.joblib  # v0.3のjoblibファイルは含める
 *.model
 
 # Results and logs
